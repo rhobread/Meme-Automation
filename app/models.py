@@ -47,6 +47,7 @@ class MemeCandidate(Identity, Base):
     final_score: Mapped[float | None]
     fingerprint: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), default="DISCOVERED")
+    discovery_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     __table_args__ = (UniqueConstraint("account_id", "fingerprint"), UniqueConstraint("account_id", "id"), CheckConstraint(f"status IN ({LIFECYCLE})"), CheckConstraint("rights_status IN ('UNKNOWN','ORIGINAL','LICENSED','REJECTED')"), CheckConstraint("final_score >= 0 AND final_score <= 100"))
 
 
@@ -65,7 +66,13 @@ class ContentPost(Identity, Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     instagram_media_id: Mapped[str | None] = mapped_column(String(100), unique=True)
     error: Mapped[str | None]
-    __table_args__ = (ForeignKeyConstraint(["account_id", "candidate_id"], ["meme_candidates.account_id", "meme_candidates.id"]), UniqueConstraint("account_id", "candidate_id"), UniqueConstraint("account_id", "id"), UniqueConstraint("account_id", "scheduled_at"), CheckConstraint(f"status IN ({LIFECYCLE})"), CheckConstraint("content_type = 'IMAGE'"), Index("ix_posts_due", "status", "scheduled_at"))
+    concept: Mapped[str | None]
+    template_type: Mapped[str | None] = mapped_column(String(40))
+    top_text: Mapped[str | None]
+    bottom_text: Mapped[str | None]
+    alt_text: Mapped[str | None]
+    generation_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    __table_args__ = (ForeignKeyConstraint(["account_id", "candidate_id"], ["meme_candidates.account_id", "meme_candidates.id"]), UniqueConstraint("account_id", "candidate_id"), UniqueConstraint("account_id", "id"), UniqueConstraint("account_id", "scheduled_at"), CheckConstraint(f"status IN ({LIFECYCLE})"), CheckConstraint("content_type = 'IMAGE'"), Index("ix_posts_due", "status", "scheduled_at"), Index("uq_posts_account_media_hash", "account_id", "media_hash", unique=True))
 
 
 class PublishingJob(Identity, Base):
@@ -121,6 +128,7 @@ class DurableJob(Identity, Base):
     lease_owner: Mapped[uuid.UUID | None]
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None]
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("account_id", "kind", "idempotency_key"), CheckConstraint("attempts >= 0"), CheckConstraint("status IN ('PENDING','RUNNING','SUCCEEDED','FAILED')"), Index("ix_jobs_pending", "status", "created_at"))
 
 
@@ -131,6 +139,25 @@ class AuditEvent(Identity, Base):
     action: Mapped[str] = mapped_column(String(100))
     entity_id: Mapped[uuid.UUID | None]
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class AIUsage(Identity, Base):
+    """One row committed before each request; interrupted requests have unknown cost."""
+    __tablename__ = "ai_usage"
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("instagram_accounts.id"), index=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("durable_jobs.id"), index=True)
+    candidate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("meme_candidates.id"))
+    operation: Mapped[str] = mapped_column(String(40))
+    model: Mapped[str] = mapped_column(String(100))
+    prompt_version: Mapped[str] = mapped_column(String(200))
+    response_id: Mapped[str | None] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(30), default="STARTED")
+    input_tokens: Mapped[int | None]
+    cached_input_tokens: Mapped[int | None]
+    output_tokens: Mapped[int | None]
+    estimated_cost_usd: Mapped[float | None]
+    pricing: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    __table_args__ = (CheckConstraint("input_tokens >= 0 AND cached_input_tokens >= 0 AND output_tokens >= 0"),)
 
 
 class OAuthState(Identity, Base):

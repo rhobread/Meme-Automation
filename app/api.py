@@ -7,6 +7,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse
 from PIL import Image, ImageCms, ImageOps
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, update
@@ -46,6 +47,7 @@ class AccountCreate(Input):
     timezone: str = "Asia/Jakarta"
     posts_per_day: int = Field(default=2, ge=0, le=25)
     active: bool = False
+    approval_mode: Literal["MANUAL", "AUTO"] = "MANUAL"
     strategy: Strategy = Field(default_factory=Strategy)
 
     @field_validator("timezone")
@@ -65,6 +67,7 @@ class AccountPatch(Input):
     timezone: str | None = None
     posts_per_day: int | None = Field(default=None, ge=0, le=25)
     active: bool | None = None
+    approval_mode: Literal["MANUAL", "AUTO"] | None = None
     strategy: Strategy | None = None
 
     @field_validator("timezone")
@@ -82,7 +85,7 @@ def account_view(db, row):
     strategy = db.get(AccountStrategy, row.id)
     return {"id": row.id, "username": row.username, "ig_user_id": row.ig_user_id,
             "niche": row.niche, "language": row.language, "timezone": row.timezone,
-            "posts_per_day": row.posts_per_day, "active": row.active,
+            "posts_per_day": row.posts_per_day, "active": row.active, "approval_mode": row.approval_mode,
             "authorized": row.encrypted_token is not None, "token_expires_at": row.token_expires_at,
             "strategy": {name: getattr(strategy, name) for name in Strategy.model_fields} if strategy else None}
 
@@ -191,8 +194,8 @@ def refresh_token(id: uuid.UUID, account_id: uuid.UUID, body: Scope | None = Non
 
 
 def validate_jpeg(data: bytes) -> bytes:
-    if not data or len(data) > 8 * 1024 * 1024:
-        raise HTTPException(422, "JPEG must be at most 8 MiB")
+    if not data or len(data) > 8_000_000:
+        raise HTTPException(422, "JPEG must be at most 8 MB")
     output = io.BytesIO()
     try:
         with Image.open(io.BytesIO(data)) as image:
@@ -215,14 +218,15 @@ def validate_jpeg(data: bytes) -> bytes:
     except Exception:
         raise HTTPException(422, "Invalid JPEG: require width 320-1440, ratio 4:5 to 1.91:1 and valid color profile") from None
     normalized = output.getvalue()
-    if len(normalized) > 8 * 1024 * 1024:
-        raise HTTPException(422, "Normalized JPEG exceeds 8 MiB")
+    if len(normalized) > 8_000_000:
+        raise HTTPException(422, "Normalized JPEG exceeds 8 MB")
     return normalized
 
 
 def content_view(row):
     return {key: getattr(row, key) for key in ("id", "account_id", "caption", "status", "media_key", "media_hash",
-                                                "published_at", "instagram_media_id", "error")}
+                                                "published_at", "instagram_media_id", "error", "concept", "template_type",
+                                                "top_text", "bottom_text", "alt_text", "hashtags", "generation_metadata")}
 
 
 @router.post("/accounts/{id}/test-image", status_code=201)
@@ -235,8 +239,10 @@ def upload_image(id: uuid.UUID, account_id: uuid.UUID, image: UploadFile = File(
     svc.account(db, id, lock=True)
     if not rights_attested:
         raise HTTPException(422, "Explicit original-image rights attestation required")
-    data = validate_jpeg(image.file.read(8 * 1024 * 1024 + 1))
+    data = validate_jpeg(image.file.read(8_000_001))
     digest = hashlib.sha256(data).hexdigest()
+    if db.scalar(select(ContentPost.id).where(ContentPost.account_id == id, ContentPost.media_hash == digest)):
+        raise HTTPException(409, "Image already exists for this account")
     if db.scalar(select(MemeCandidate.id).where(MemeCandidate.account_id == id, MemeCandidate.fingerprint == digest)):
         raise HTTPException(409, "Image already exists for this account")
     candidate = MemeCandidate(account_id=id, source_name="manual_original", title="Operator original JPEG",
@@ -265,6 +271,21 @@ def get_content(id: uuid.UUID, account_id: uuid.UUID, db: Session = Depends(svc.
     return content_view(svc.post(db, id, account_id))
 
 
+@router.get("/content/{id}/image")
+def preview_content(id: uuid.UUID, account_id: uuid.UUID, db: Session = Depends(svc.session)):
+    from integrations.local_storage import LocalStorageClient
+    row = svc.post(db, id, account_id)
+    if not row.media_key:
+        raise HTTPException(404, "Media unavailable")
+    with svc.storage_client() as storage:
+        if isinstance(storage, LocalStorageClient):
+            path = storage.path(row.media_key)
+            if not path.is_file():
+                raise HTTPException(404, "Media unavailable")
+            return FileResponse(path, media_type="image/jpeg", headers={"X-Content-Type-Options": "nosniff"})
+        return RedirectResponse(storage.signed_url(row.media_key), status_code=307)
+
+
 class Review(Input):
     account_id: uuid.UUID | None = None
     status: Literal["APPROVED", "REJECTED", "REVIEW"]
@@ -284,6 +305,7 @@ def review_content(id: uuid.UUID, account_id: uuid.UUID, body: Review, db: Sessi
     if body.caption is not None:
         row.caption = body.caption
     row.status = body.status
+    candidate.status = body.status
     svc.audit(db, account_id, "review_" + body.status.lower(), id)
     db.commit()
     return content_view(row)
@@ -313,10 +335,106 @@ def job_status(id: uuid.UUID, account_id: uuid.UUID, db: Session = Depends(svc.s
     job = db.scalar(select(DurableJob).where(DurableJob.id == id, DurableJob.account_id == account_id))
     if job is None:
         raise HTTPException(404, "Job not found")
-    publishing = db.scalar(select(PublishingJob).where(PublishingJob.post_id == uuid.UUID(job.payload["post_id"])))
-    return {"id": job.id, "account_id": job.account_id, "status": job.status, "result": job.result,
-            "error": job.error, "publishing_status": publishing.status, "container_id": publishing.container_id,
-            "next_attempt_at": publishing.next_attempt_at, "attempts": publishing.attempts}
+    result = {"id": job.id, "account_id": job.account_id, "kind": job.kind, "status": job.status, "result": job.result,
+              "error": job.error, "attempts": job.attempts, "next_attempt_at": job.next_attempt_at,
+              "lease_until": job.lease_until, "finished_at": job.finished_at}
+    if job.kind == "publish":
+        publishing = db.scalar(select(PublishingJob).where(PublishingJob.post_id == uuid.UUID(job.payload["post_id"])))
+        if publishing:
+            result.update(publishing_status=publishing.status, container_id=publishing.container_id,
+                          next_attempt_at=publishing.next_attempt_at, attempts=publishing.attempts)
+    return result
+
+
+class JobRequest(Input):
+    account_id: uuid.UUID
+    idempotency_key: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+class GenerationRequest(JobRequest):
+    candidate_id: uuid.UUID | None = None
+
+
+def accept_job(body, kind, query_account_id, db):
+    from app.jobs import dispatch_job, enqueue_job
+    if query_account_id is not None:
+        check_scope(query_account_id, body.account_id)
+    payload = {}
+    candidate_id = getattr(body, "candidate_id", None)
+    if candidate_id is not None:
+        candidate = db.scalar(select(MemeCandidate.id).where(MemeCandidate.id == candidate_id,
+                                                            MemeCandidate.account_id == body.account_id))
+        if candidate is None:
+            raise HTTPException(404, "Candidate not found")
+        payload["candidate_id"] = str(candidate_id)
+    job = enqueue_job(db, body.account_id, kind, body.idempotency_key, payload)
+    submitted = dispatch_job(job.id)
+    return {"job_id": job.id, "status": job.status, "dispatch": "submitted" if submitted else "pending_recovery"}
+
+
+@router.post("/jobs/discovery", status_code=202)
+def discovery_job(body: JobRequest, account_id: uuid.UUID | None = None, db: Session = Depends(svc.session)):
+    return accept_job(body, "discovery", account_id, db)
+
+
+@router.post("/jobs/generation", status_code=202)
+def generation_job(body: GenerationRequest, account_id: uuid.UUID | None = None, db: Session = Depends(svc.session)):
+    return accept_job(body, "generation", account_id, db)
+
+
+@router.post("/jobs/schedule", status_code=202)
+def schedule_job(body: JobRequest, account_id: uuid.UUID | None = None, db: Session = Depends(svc.session)):
+    return accept_job(body, "schedule", account_id, db)
+
+
+@router.post("/jobs/publish-due", status_code=202)
+def publish_due_job(body: JobRequest, account_id: uuid.UUID | None = None, db: Session = Depends(svc.session)):
+    return accept_job(body, "publish-due", account_id, db)
+
+
+@router.post("/jobs/analytics", status_code=202)
+def analytics_job(body: JobRequest, account_id: uuid.UUID | None = None, db: Session = Depends(svc.session)):
+    return accept_job(body, "analytics", account_id, db)
+
+
+@router.get("/analytics/summary")
+def analytics_summary(account_id: uuid.UUID, days: int = 14, db: Session = Depends(svc.session)):
+    from app.analytics import summary
+    if not 1 <= days <= 90:
+        raise HTTPException(422, "Days must be between1 and90")
+    return summary(db, account_id, days)
+
+
+@router.get("/analytics/weekly")
+def latest_weekly_report(account_id: uuid.UUID, db: Session = Depends(svc.session)):
+    svc.account(db, account_id)
+    job = db.scalar(select(DurableJob).where(DurableJob.account_id == account_id,
+        DurableJob.kind == "weekly-report", DurableJob.status == "SUCCEEDED").order_by(DurableJob.finished_at.desc()).limit(1))
+    if job is None:
+        raise HTTPException(404, "No completed weekly report")
+    return {"job_id": job.id, "report": job.result}
+
+
+@router.get("/monitoring")
+def monitoring_status(db: Session = Depends(svc.session)):
+    from app.analytics import monitoring
+    return monitoring(db)
+
+
+@router.post("/jobs/{id}/retry", status_code=202)
+def retry_job(id: uuid.UUID, account_id: uuid.UUID, db: Session = Depends(svc.session)):
+    from app.jobs import GENERIC_KINDS, dispatch_job
+    job = db.scalar(select(DurableJob).where(DurableJob.id == id, DurableJob.account_id == account_id).with_for_update())
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.kind not in GENERIC_KINDS or job.status != "FAILED":
+        raise HTTPException(409, "Only failed non-publishing jobs can be retried")
+    job.status, job.attempts, job.error, job.finished_at = "PENDING", 0, None, None
+    job.lease_until, job.lease_owner, job.next_attempt_at = None, None, None
+    svc.audit(db, account_id, "job_manual_retry", id)
+    db.commit()
+    submitted = dispatch_job(job.id)
+    return {"job_id": job.id, "status": job.status, "dispatch": "submitted" if submitted else "pending_recovery"}
 
 
 class Reconcile(Input):

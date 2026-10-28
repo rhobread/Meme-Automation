@@ -3,7 +3,7 @@ import logging
 
 from app.config import get_settings
 
-for name in ("httpx", "httpcore"):
+for name in ("httpx", "httpcore", "openai"):
     logging.getLogger(name).setLevel(logging.CRITICAL)
 
 celery_app = Celery("meme", broker=get_settings().redis_url.get_secret_value(), backend=get_settings().redis_url.get_secret_value())
@@ -12,7 +12,8 @@ celery_app.conf.update(
     accept_content=["json"], result_expires=3600, broker_connection_retry_on_startup=True,
     worker_hijack_root_logger=False, task_time_limit=300, task_soft_time_limit=240,
     task_acks_late=True, task_reject_on_worker_lost=True,
-    beat_schedule={"recover-publish-outbox": {"task": "app.worker.recover", "schedule": 60.0}},
+    beat_schedule={"recover-publish-outbox": {"task": "app.worker.recover", "schedule": 60.0},
+                   "hourly-account-maintenance": {"task": "app.worker.maintenance", "schedule": 3600.0}},
 )
 
 
@@ -36,7 +37,26 @@ def publish_task(job_id):
 @celery_app.task(name="app.worker.recover", ignore_result=True)
 def recover_task():
     from app.publishing import recover_pending
+    from app.jobs import recover_jobs
     try:
-        return {"submitted": recover_pending()}
+        return {"submitted": recover_pending() + recover_jobs()}
+    except Exception:
+        return {"status": "pending_database_recovery"}
+
+
+@celery_app.task(name="app.worker.generic", ignore_result=True, time_limit=480, soft_time_limit=420)
+def generic_task(job_id):
+    from app.jobs import run_job
+    try:
+        run_job(job_id)
+    except Exception:
+        return {"status": "pending_database_recovery"}
+
+
+@celery_app.task(name="app.worker.maintenance", ignore_result=True)
+def maintenance_task():
+    from app.maintenance import enqueue_housekeeping
+    try:
+        return {"submitted": enqueue_housekeeping()}
     except Exception:
         return {"status": "pending_database_recovery"}

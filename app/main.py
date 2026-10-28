@@ -2,7 +2,7 @@ import logging
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from redis import Redis
@@ -39,6 +39,19 @@ app = FastAPI(title="Meme Automation Internal API", docs_url=None, redoc_url=Non
 from app.api import router, oauth_router
 app.include_router(router)
 app.include_router(oauth_router)
+
+
+@app.get("/media/{key:path}", include_in_schema=False)
+def signed_media(key: str, expires: int, signature: str):
+    from app.services import storage_client
+    if get_settings().storage_provider != "local":
+        raise HTTPException(404, "Media unavailable")
+    try:
+        with storage_client() as storage:
+            path = storage.verified_path(key, expires, signature)
+    except StorageError:
+        raise HTTPException(404, "Media unavailable") from None
+    return FileResponse(path, media_type="image/jpeg", headers={"X-Content-Type-Options": "nosniff"})
 
 
 @app.exception_handler(RequestValidationError)

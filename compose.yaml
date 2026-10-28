@@ -6,6 +6,16 @@ x-app: &app
     INTERNAL_API_KEY: ${INTERNAL_API_KEY:?Set INTERNAL_API_KEY}
     TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?Set TOKEN_ENCRYPTION_KEY}
     ENABLE_AUTOPUBLISH: ${ENABLE_AUTOPUBLISH:-false}
+    ALLOW_PAID_SERVICES: 'false'
+    AI_PROVIDER: ollama
+    OLLAMA_URL: http://host.docker.internal:11434
+    OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+    OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-60}
+    STORAGE_PROVIDER: local
+    LOCAL_MEDIA_DIR: /srv/media
+    MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-}
+    DISCOVERY_FEEDS: ${DISCOVERY_FEEDS:-[]}
+    ENABLE_AUTOAPPROVAL: 'false'
     META_APP_ID: ${META_APP_ID:-}
     META_APP_SECRET: ${META_APP_SECRET:-}
     META_REDIRECT_URI: ${META_REDIRECT_URI:-}
@@ -16,6 +26,8 @@ x-app: &app
     PUBLISHING_QUOTA_CAP: ${PUBLISHING_QUOTA_CAP:-25}
   networks: [backend]
   init: true
+  extra_hosts: ['host.docker.internal:host-gateway']
+  volumes: [media_data:/srv/media]
   security_opt: [no-new-privileges:true]
 
 services:
@@ -127,3 +139,4 @@ volumes:
   postgres_data:
   redis_data:
   n8n_data:
+  media_data:

@@ -4,7 +4,10 @@ WORKDIR /srv
 COPY pyproject.toml ./
 COPY app ./app
 COPY integrations ./integrations
-RUN pip install --no-cache-dir . && useradd --uid 10001 --create-home app
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir . && useradd --uid 10001 --create-home app \
+    && mkdir -p /srv/media && chown app:app /srv/media
 COPY alembic.ini ./
 COPY migrations ./migrations
 USER app

@@ -9,6 +9,7 @@ from app.db import get_engine
 from app.models import InstagramAccount, ContentPost, AuditEvent
 from integrations.meta import MetaClient
 from integrations.storage import StorageClient
+from integrations.local_storage import LocalStorageClient
 
 
 def now():
@@ -33,6 +34,9 @@ def meta_client():
 
 def storage_client():
     s = get_settings()
+    if s.storage_provider == "local":
+        return LocalStorageClient(s.local_media_dir, s.token_encryption_key.get_secret_value(),
+                                  s.media_public_base_url, s.media_url_ttl_seconds)
     return StorageClient(s.supabase_url, s.supabase_service_role_key.get_secret_value(), s.supabase_bucket)
 
 

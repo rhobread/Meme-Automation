@@ -1,0 +1,79 @@
+{
+  "name": "Meme 02 - Generate Content",
+  "active": false,
+  "nodes": [
+    {
+      "id": "generation-trigger",
+      "name": "Jakarta 0615 And 1815",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "0 15 6,18 * * *"}]}},
+      "notes": "Import inactive into n8n 2.45.4. Select Header Auth credential Meme Internal API in both HTTP nodes: header X-API-Key, value from backend INTERNAL_API_KEY. Configure an n8n Error Workflow before activating. GET accounts returns a bare JSON array, one output item per account. Only active accounts reach POST. Backend owns AI, rights checks, rendering and review; this workflow does not approve or publish content. Node retries reuse the execution/account idempotency key; retrying an entire execution creates a new key.",
+      "notesInFlow": true
+    },
+    {
+      "id": "generation-accounts",
+      "name": "Get Accounts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "http://api:8000/api/v1/accounts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {"timeout": 30000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"responseFormat": "json", "fullResponse": false, "neverError": false}}}
+      },
+      "credentials": {"httpHeaderAuth": {"id": "CONFIGURE_MEME_INTERNAL_API", "name": "Meme Internal API"}},
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "generation-active",
+      "name": "Account Is Active",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [480, 0],
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2},
+          "conditions": [{"id": "generation-active-boolean", "leftValue": "={{ $json.active }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "generation-job",
+      "name": "Request Generation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, -80],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/api/v1/jobs/generation",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {"parameters": [{"name": "account_id", "value": "={{ $json.id }}"}, {"name": "idempotency_key", "value": "={{ 'n8n:generation:' + $execution.id + ':' + $json.id }}"}]},
+        "options": {"timeout": 30000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"responseFormat": "json", "fullResponse": false, "neverError": false}}}
+      },
+      "credentials": {"httpHeaderAuth": {"id": "CONFIGURE_MEME_INTERNAL_API", "name": "Meme Internal API"}},
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Jakarta 0615 And 1815": {"main": [[{"node": "Get Accounts", "type": "main", "index": 0}]]},
+    "Get Accounts": {"main": [[{"node": "Account Is Active", "type": "main", "index": 0}]]},
+    "Account Is Active": {"main": [[{"node": "Request Generation", "type": "main", "index": 0}], []]}
+  },
+  "settings": {"executionOrder": "v1", "timezone": "Asia/Jakarta", "executionTimeout": 180},
+  "pinData": {},
+  "tags": []
+}

@@ -1,0 +1,79 @@
+{
+  "name": "Meme 01 - Discover Ideas",
+  "active": false,
+  "nodes": [
+    {
+      "id": "discovery-trigger",
+      "name": "Every Six Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "0 0 */6 * * *"}]}},
+      "notes": "Import inactive into n8n 2.45.4. Select the Header Auth credential Meme Internal API in both HTTP nodes: header X-API-Key, value from the backend INTERNAL_API_KEY. Configure an n8n Error Workflow for request failures before activating. GET accounts must return a bare JSON array; HTTP Request emits one item per account. Only active accounts reach the POST. Backend owns discovery, deduplication and job execution. Node retries reuse the execution/account idempotency key; retrying an entire execution creates a new key.",
+      "notesInFlow": true
+    },
+    {
+      "id": "discovery-accounts",
+      "name": "Get Accounts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "http://api:8000/api/v1/accounts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {"timeout": 30000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"responseFormat": "json", "fullResponse": false, "neverError": false}}}
+      },
+      "credentials": {"httpHeaderAuth": {"id": "CONFIGURE_MEME_INTERNAL_API", "name": "Meme Internal API"}},
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "discovery-active",
+      "name": "Account Is Active",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [480, 0],
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2},
+          "conditions": [{"id": "discovery-active-boolean", "leftValue": "={{ $json.active }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "discovery-job",
+      "name": "Request Discovery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, -80],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/api/v1/jobs/discovery",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {"parameters": [{"name": "account_id", "value": "={{ $json.id }}"}, {"name": "idempotency_key", "value": "={{ 'n8n:discovery:' + $execution.id + ':' + $json.id }}"}]},
+        "options": {"timeout": 30000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"responseFormat": "json", "fullResponse": false, "neverError": false}}}
+      },
+      "credentials": {"httpHeaderAuth": {"id": "CONFIGURE_MEME_INTERNAL_API", "name": "Meme Internal API"}},
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Every Six Hours": {"main": [[{"node": "Get Accounts", "type": "main", "index": 0}]]},
+    "Get Accounts": {"main": [[{"node": "Account Is Active", "type": "main", "index": 0}]]},
+    "Account Is Active": {"main": [[{"node": "Request Discovery", "type": "main", "index": 0}], []]}
+  },
+  "settings": {"executionOrder": "v1", "timezone": "Asia/Jakarta", "executionTimeout": 180},
+  "pinData": {},
+  "tags": []
+}

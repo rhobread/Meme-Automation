@@ -12,6 +12,8 @@ Build an end-to-end AI-driven Instagram meme operation managing **3 authorized I
 - Indonesian language captions optimized for relevance and genuine engagement; no guarantees of virality.
 
 ## Stack and responsibility
+Cost override from the user's later instruction: do not require additional paid subscriptions/services beyond ChatGPT Plus. Plus does not include OpenAI API usage. Default AI is now local Ollama with cloud disabled and mandatory manual review; default storage is private local filesystem with expiring signed HTTPS media URLs. The original OpenAI/Supabase adapters are optional, not enabled by Compose, and no paid service is authorized. No cloud model downloads/provisioning or paid calls are performed automatically. Live HTTPS hosting, local model/hardware and Meta authorization remain operator prerequisites.
+
 - Docker Compose services: FastAPI (Python 3.12), Celery worker, Redis broker, PostgreSQL 16, n8n.
 - n8n: scheduling, HTTP triggering, monitoring, alerts; never stores per-account Meta tokens or core business logic.
 - Python services: source discovery adapters, deduplication, AI scoring, meme joke/caption creation, Pillow rendering, storage uploads, scheduling, Meta OAuth & publishing, insights, retry/reconciliation.

@@ -1,0 +1,86 @@
+{
+  "name": "Meme 06 - Failure Monitoring And Alerts",
+  "active": false,
+  "nodes": [
+    {
+      "id": "monitoring-trigger",
+      "name": "Every Fifteen Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "0 */15 * * * *"}]}},
+      "notes": "Import inactive into n8n 2.45.4. Select Header Auth credential Meme Internal API: header X-API-Key, value from backend INTERNAL_API_KEY. Select SMTP credential Meme Alerts SMTP in Send Failure Alert, and configure n8n variables ALERT_EMAIL (recipient) and ALERT_FROM_EMAIL (authorized sender). If variables are unavailable in your n8n edition, replace only the two email address fields in the UI. Never place passwords or API keys in workflow parameters. GET monitoring must return healthy:boolean and sanitized failed_jobs/stale_jobs/uncertain_publications counts. Unhealthy, missing health or request failure sends an alert then fails the execution. Healthy ends without email. Persistent incidents alert every 15 minutes; backend owns health classification. Configure an n8n Error Workflow for SMTP/other execution errors too. SMTP delivery and n8n runtime require operator testing before activation.",
+      "notesInFlow": true
+    },
+    {
+      "id": "monitoring-check",
+      "name": "Get Monitoring Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "http://api:8000/api/v1/monitoring",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {"timeout": 30000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"responseFormat": "json", "fullResponse": false, "neverError": false}}}
+      },
+      "credentials": {"httpHeaderAuth": {"id": "CONFIGURE_MEME_INTERNAL_API", "name": "Meme Internal API"}},
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "monitoring-unhealthy",
+      "name": "Monitoring Is Unhealthy",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [480, 0],
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2},
+          "conditions": [{"id": "monitoring-unhealthy-boolean", "leftValue": "={{ $json.healthy !== true }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "monitoring-email",
+      "name": "Send Failure Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [720, -80],
+      "parameters": {
+        "resource": "email",
+        "operation": "send",
+        "fromEmail": "={{ $vars.ALERT_FROM_EMAIL }}",
+        "toEmail": "={{ $vars.ALERT_EMAIL }}",
+        "subject": "[Meme Automation] Backend monitoring unhealthy or unavailable",
+        "emailFormat": "text",
+        "text": "=Backend monitoring is unhealthy or unavailable.\nFailed jobs: {{ $json.failed_jobs ?? 'unavailable' }}\nStale jobs: {{ $json.stale_jobs ?? 'unavailable' }}\nUncertain publications: {{ $json.uncertain_publications ?? 'unavailable' }}\nn8n execution: {{ $execution.id }}\nInspect the authenticated backend monitoring endpoint and job statuses. Do not retry uncertain publications blindly.",
+        "options": {"appendAttribution": false, "allowUnauthorizedCerts": false}
+      },
+      "credentials": {"smtp": {"id": "CONFIGURE_MEME_ALERTS_SMTP", "name": "Meme Alerts SMTP"}}
+    },
+    {
+      "id": "monitoring-error",
+      "name": "Mark Monitoring Failure",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [960, -80],
+      "parameters": {"errorType": "errorMessage", "errorMessage": "Backend monitoring is unhealthy or unavailable. An SMTP alert was submitted; inspect backend job statuses and reconcile uncertain publications manually."}
+    }
+  ],
+  "connections": {
+    "Every Fifteen Minutes": {"main": [[{"node": "Get Monitoring Status", "type": "main", "index": 0}]]},
+    "Get Monitoring Status": {"main": [[{"node": "Monitoring Is Unhealthy", "type": "main", "index": 0}]]},
+    "Monitoring Is Unhealthy": {"main": [[{"node": "Send Failure Alert", "type": "main", "index": 0}], []]},
+    "Send Failure Alert": {"main": [[{"node": "Mark Monitoring Failure", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1", "timezone": "Asia/Jakarta", "executionTimeout": 180},
+  "pinData": {},
+  "tags": []
+}

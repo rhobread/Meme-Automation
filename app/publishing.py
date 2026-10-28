@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_engine
-from app.models import ContentPost, DurableJob, MemeCandidate, PublishingJob
+from app.models import ContentPost, DurableJob, InstagramAccount, MemeCandidate, PublishingJob
 from app.security import decrypt_token
 from app import services as svc
 from integrations.meta import ContainerStatus
@@ -25,8 +25,12 @@ def gate(db, account, post):
         raise HTTPException(409, "Account token unavailable or expiring")
     candidate = db.scalar(select(MemeCandidate).where(MemeCandidate.id == post.candidate_id,
                                                      MemeCandidate.account_id == account.id))
-    if post.status != "APPROVED" or not candidate or candidate.rights_status != "ORIGINAL" or not post.media_key or not post.media_hash:
+    if post.status not in ("APPROVED", "SCHEDULED") or not candidate or candidate.rights_status != "ORIGINAL" or not post.media_key or not post.media_hash:
         raise HTTPException(409, "Approved original media required")
+    if post.status == "SCHEDULED" and (not post.scheduled_at or svc.utc(post.scheduled_at) > svc.now()):
+        raise HTTPException(409, "Scheduled content is not due")
+    if post.status == "SCHEDULED" and svc.utc(post.scheduled_at) < svc.now() - timedelta(hours=1):
+        raise HTTPException(409, "Missed schedule requires operator review")
     uncertain = db.scalar(select(PublishingJob.id).join(ContentPost, PublishingJob.post_id == ContentPost.id).where(
         ContentPost.account_id == account.id, ContentPost.id != post.id, PublishingJob.status == "UNCERTAIN"))
     if uncertain:
@@ -81,6 +85,7 @@ def complete(db, job, publication, post, media_id):
     post.instagram_media_id = media_id
     post.published_at = post.published_at or svc.now()
     post.error = None
+    db.get(MemeCandidate, post.candidate_id).status = "PUBLISHED"
     publication.status, publication.error = "SUCCEEDED", None
     publication.next_attempt_at = None
     job.status, job.error, job.finished_at = "SUCCEEDED", None, svc.now()
@@ -110,6 +115,14 @@ def run_publish(job_id):
         try:
             gate(db, account, post)
         except HTTPException:
+            if post.status == "SCHEDULED" and post.scheduled_at and svc.utc(post.scheduled_at) < svc.now() - timedelta(hours=1):
+                publication.status, publication.error, publication.next_attempt_at = "FAILED", "missed_schedule", None
+                job.status, job.error, job.finished_at = "FAILED", "missed_schedule", svc.now()
+                post.status, post.error = "FAILED", "missed_schedule"
+                db.get(MemeCandidate, post.candidate_id).status = "FAILED"
+                svc.audit(db, account_id, "queued_schedule_missed", post.id)
+                db.commit()
+                return
             publication.error = "safety_gate_blocked"
             publication.next_attempt_at = svc.now() + timedelta(minutes=1)
             db.commit()
@@ -136,7 +149,7 @@ def run_publish(job_id):
                 if not publication.container_id:
                     with svc.storage_client() as storage:
                         url = storage.signed_url(post.media_key)
-                    publication.container_id = meta.create_jpeg_container(account.ig_user_id, token, url, post.caption or "")
+                    publication.container_id = meta.create_jpeg_container(account.ig_user_id, token, url, post.caption or "", alt_text=post.alt_text)
                     publication.error = None
                     db.commit()
                     return
@@ -144,6 +157,7 @@ def run_publish(job_id):
                 if status == ContainerStatus.PUBLISHED:
                     publication.status, publication.error = "UNCERTAIN", "published_missing_media_id"
                     post.status, post.published_at = "PUBLISHED", svc.now()
+                    db.get(MemeCandidate, post.candidate_id).status = "PUBLISHED"
                     publication.next_attempt_at = None
                     db.commit()
                     return
@@ -180,7 +194,7 @@ def run_publish(job_id):
 
 def recover_pending():
     with Session(get_engine()) as db:
-        jobs = db.scalars(select(DurableJob).where(DurableJob.kind == "publish",
+        jobs = db.scalars(select(DurableJob).join(InstagramAccount).where(InstagramAccount.active.is_(True), DurableJob.kind == "publish",
                                                   DurableJob.status.in_(("PENDING", "RUNNING"))))
         ids = []
         for job in jobs:
@@ -207,6 +221,7 @@ def reconcile(db, account_id, post_id, verified_media_id=None, operator_verified
     publication.next_attempt_at = svc.now() + timedelta(minutes=1)
     if status == ContainerStatus.PUBLISHED:
         post.status, post.published_at = "PUBLISHED", post.published_at or svc.now()
+        db.get(MemeCandidate, post.candidate_id).status = "PUBLISHED"
         publication.error = "published_missing_media_id"
         if verified_media_id is not None:
             if not operator_verified:

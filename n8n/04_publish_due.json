@@ -1,0 +1,79 @@
+{
+  "name": "Meme 04 - Publish Due Content",
+  "active": false,
+  "nodes": [
+    {
+      "id": "publish-due-trigger",
+      "name": "Every Five Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "0 */5 * * * *"}]}},
+      "notes": "Import inactive into n8n 2.45.4. Select Header Auth credential Meme Internal API in both HTTP nodes: header X-API-Key, value from backend INTERNAL_API_KEY. Configure an n8n Error Workflow before activating. GET accounts returns a bare JSON array, one item per account. Only active accounts reach POST. This queues backend work only, never calls Meta. Backend must enforce kill switch, approval, due time, locks, quotas and UNCERTAIN reconciliation. Node retries reuse the execution/account idempotency key; retrying an entire execution creates a new key.",
+      "notesInFlow": true
+    },
+    {
+      "id": "publish-due-accounts",
+      "name": "Get Accounts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "http://api:8000/api/v1/accounts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {"timeout": 30000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"responseFormat": "json", "fullResponse": false, "neverError": false}}}
+      },
+      "credentials": {"httpHeaderAuth": {"id": "CONFIGURE_MEME_INTERNAL_API", "name": "Meme Internal API"}},
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "publish-due-active",
+      "name": "Account Is Active",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [480, 0],
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2},
+          "conditions": [{"id": "publish-due-active-boolean", "leftValue": "={{ $json.active }}", "rightValue": "", "operator": {"type": "boolean", "operation": "true", "singleValue": true}}],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "publish-due-job",
+      "name": "Request Due Publishing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, -80],
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/api/v1/jobs/publish-due",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {"parameters": [{"name": "account_id", "value": "={{ $json.id }}"}, {"name": "idempotency_key", "value": "={{ 'n8n:publish-due:' + $execution.id + ':' + $json.id }}"}]},
+        "options": {"timeout": 30000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"responseFormat": "json", "fullResponse": false, "neverError": false}}}
+      },
+      "credentials": {"httpHeaderAuth": {"id": "CONFIGURE_MEME_INTERNAL_API", "name": "Meme Internal API"}},
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Every Five Minutes": {"main": [[{"node": "Get Accounts", "type": "main", "index": 0}]]},
+    "Get Accounts": {"main": [[{"node": "Account Is Active", "type": "main", "index": 0}]]},
+    "Account Is Active": {"main": [[{"node": "Request Due Publishing", "type": "main", "index": 0}], []]}
+  },
+  "settings": {"executionOrder": "v1", "timezone": "Asia/Jakarta", "executionTimeout": 180},
+  "pinData": {},
+  "tags": []
+}

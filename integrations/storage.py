@@ -1,5 +1,6 @@
 """Private Supabase Storage REST adapter; never exposes upstream exceptions."""
 from urllib.parse import quote, urlsplit
+import hashlib
 
 import httpx
 
@@ -54,3 +55,35 @@ class StorageClient:
         if not isinstance(signed, str) or not signed.startswith("/object/sign/"):
             raise StorageError()
         return self.url + signed
+
+    def ensure_upload(self, object_path: str, jpeg_bytes: bytes) -> None:
+        """Replay-safe, no overwrite: accept an existing object only if bytes match."""
+        bucket = self._request("GET", f"/bucket/{self.bucket}")
+        if bucket.get("public") is not False:
+            raise StorageError()
+        path = f"/{self.bucket}/{quote(object_path, safe='/')}"
+        accepted = False
+        try:
+            response = self.client.post(self.url + "/object" + path, content=jpeg_bytes,
+                                        headers={"Content-Type": "image/jpeg", "x-upsert": "false"})
+            if 200 <= response.status_code < 300:
+                accepted = True
+            else:
+                # Supabase may encode a duplicate as HTTP 400 with statusCode 409.
+                duplicate = response.status_code == 409 or (response.status_code == 400 and
+                            str(response.json().get("statusCode")) == "409")
+                if duplicate:
+                    with self.client.stream("GET", self.url + "/object/authenticated" + path) as existing:
+                        if existing.status_code == 200:
+                            digest = hashlib.sha256()
+                            size = 0
+                            for part in existing.iter_bytes():
+                                size += len(part)
+                                if size > len(jpeg_bytes):
+                                    raise ValueError()
+                                digest.update(part)
+                            accepted = size == len(jpeg_bytes) and digest.digest() == hashlib.sha256(jpeg_bytes).digest()
+        except (httpx.RequestError, ValueError, AttributeError):
+            pass
+        if not accepted:
+            raise StorageError()
