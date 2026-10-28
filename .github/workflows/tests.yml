@@ -1,0 +1,61 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m pytest -q
+      - run: python -m pip check
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography
+      - name: Generate isolated test credentials
+        shell: python
+        run: |
+          import secrets
+          from pathlib import Path
+          from cryptography.fernet import Fernet
+
+          values = {
+              'POSTGRES_PASSWORD': secrets.token_hex(32),
+              'INTERNAL_API_KEY': secrets.token_hex(32),
+              'TOKEN_ENCRYPTION_KEY': Fernet.generate_key().decode(),
+              'N8N_ENCRYPTION_KEY': secrets.token_hex(32),
+              'ENABLE_AUTOPUBLISH': 'false',
+          }
+          Path('.env').write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+      - run: docker compose config --quiet
+      - run: docker compose up --build --wait --wait-timeout 240
+      - run: docker compose exec -T api python -m app.smoke
+      - name: Verify n8n readiness
+        run: python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:5678/healthz', timeout=10).status == 200"
+      - name: Report service state
+        if: always()
+        run: docker compose ps -a
+      - name: Remove ephemeral CI services
+        if: always()
+        run: docker compose down --volumes

@@ -1,0 +1,129 @@
+x-app: &app
+  build: .
+  environment: &app-env
+    DATABASE_URL: postgresql+psycopg://meme:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/meme
+    REDIS_URL: redis://redis:6379/0
+    INTERNAL_API_KEY: ${INTERNAL_API_KEY:?Set INTERNAL_API_KEY}
+    TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?Set TOKEN_ENCRYPTION_KEY}
+    ENABLE_AUTOPUBLISH: ${ENABLE_AUTOPUBLISH:-false}
+    META_APP_ID: ${META_APP_ID:-}
+    META_APP_SECRET: ${META_APP_SECRET:-}
+    META_REDIRECT_URI: ${META_REDIRECT_URI:-}
+    META_API_VERSION: ${META_API_VERSION:-v26.0}
+    SUPABASE_URL: ${SUPABASE_URL:-}
+    SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+    SUPABASE_BUCKET: ${SUPABASE_BUCKET:-originals}
+    PUBLISHING_QUOTA_CAP: ${PUBLISHING_QUOTA_CAP:-25}
+  networks: [backend]
+  init: true
+  security_opt: [no-new-privileges:true]
+
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: meme
+      POSTGRES_USER: meme
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      TZ: UTC
+      PGTZ: UTC
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U meme -d meme']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --appendonly, 'yes', --maxmemory-policy, noeviction]
+    volumes: [redis_data:/data]
+    networks: [backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *app
+    command: [alembic, upgrade, head]
+    restart: 'no'
+    depends_on:
+      db: {condition: service_healthy}
+
+  api:
+    <<: *app
+    networks: [backend, egress]
+    ports: ['127.0.0.1:8000:8000']
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import os,urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/api/v1/health',headers={'X-API-Key':os.environ['INTERNAL_API_KEY']}),timeout=10)"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    <<: *app
+    networks: [backend, egress]
+    command: [celery, -A, app.worker:celery_app, worker, --loglevel=WARNING, --concurrency=2, --hostname=worker@%h]
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, 'celery -A app.worker:celery_app inspect ping --destination "worker@$$HOSTNAME" --timeout 5']
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+
+  beat:
+    <<: *app
+    command: [celery, -A, app.worker:celery_app, beat, --loglevel=WARNING, --schedule=/tmp/celerybeat-schedule]
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.45.4
+    ports: ['127.0.0.1:5678:5678']
+    environment:
+      GENERIC_TIMEZONE: Asia/Jakarta
+      TZ: Asia/Jakarta
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: 'true'
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY}
+      N8N_HOST: localhost
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: 'false'
+      N8N_DIAGNOSTICS_ENABLED: 'false'
+      N8N_PERSONALIZATION_ENABLED: 'false'
+    volumes: [n8n_data:/home/node/.n8n]
+    networks: [backend, egress]
+    restart: unless-stopped
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  backend:
+    internal: true
+  egress:
+
+volumes:
+  postgres_data:
+  redis_data:
+  n8n_data:
